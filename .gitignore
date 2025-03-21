@@ -1,0 +1,6 @@
+.env
+research.sh
+__pycache__/
+research_db/
+venv/
+newvenv/
