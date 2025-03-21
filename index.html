@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MCP Research Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        svg { width: 100%; height: 600px; background: #f0f0f0; }
+        .node circle { fill: #69b3a2; stroke: #fff; stroke-width: 2px; transition: fill 0.3s; }
+        .node.active circle { fill: #ff6b6b; } /* Highlight for Claude when active */
+        .node text { font-size: 12px; fill: #333; }
+        .link { stroke: red; stroke-width: 2px; stroke-dasharray: 5; }
+        .tooltip { 
+            position: absolute; 
+            background: rgba(255, 255, 255, 0.9); 
+            border: 1px solid #ccc; 
+            padding: 5px; 
+            font-size: 10px; 
+            pointer-events: none; 
+            max-width: 200px; 
+            white-space: pre-wrap; 
+        }
+        #log { 
+            position: absolute; 
+            bottom: 10px; 
+            left: 10px; 
+            right: 10px; 
+            height: 150px; 
+            overflow-y: auto; 
+            background: #fff; 
+            border: 1px solid #ccc; 
+            padding: 10px; 
+            font-size: 12px; 
+        }
+    </style>
+</head>
+<body>
+    <svg></svg>
+    <div id="log"></div>
+    <script>
+        const svg = d3.select("svg"),
+              width = window.innerWidth,
+              height = 600;
+
+        const nodes = [
+            { id: "Research Assistant", x: width / 2, y: height / 2 },
+            { id: "Brave", x: width / 4, y: height / 4 },
+            { id: "Puppeteer", x: 3 * width / 4, y: height / 4 },
+            { id: "GitHub", x: width / 4, y: 3 * height / 4 },
+            { id: "Notion", x: 3 * width / 4, y: 3 * height / 4 },
+            { id: "Claude", x: width / 2, y: height / 3, fixed: true } // Claude node
+        ];
+        let links = [];
+
+        const simulation = d3.forceSimulation(nodes)
+            .force("charge", d3.forceManyBody().strength(-150))
+            .force("center", d3.forceCenter(width / 2, height / 2))
+            .force("link", d3.forceLink(links).distance(100))
+            .force("collision", d3.forceCollide(50));
+
+        const link = svg.append("g")
+            .selectAll(".link")
+            .data(links)
+            .enter().append("line")
+            .attr("class", "link");
+
+        const node = svg.append("g")
+            .selectAll(".node")
+            .data(nodes)
+            .enter().append("g")
+            .attr("class", "node");
+
+        node.append("circle").attr("r", 10);
+        node.append("text").text(d => d.id).attr("dx", 12).attr("dy", ".35em");
+
+        // Tooltip for tools
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+
+        simulation.on("tick", () => {
+            link.attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+            node.attr("transform", d => `translate(${d.x},${d.y})`);
+        });
+
+        const log = document.getElementById("log");
+        function addLog(message) {
+            const p = document.createElement("p");
+            p.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+            log.appendChild(p);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        const ws = new WebSocket("ws://localhost:8765");
+        ws.onopen = () => addLog("Connected to WebSocket server");
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            addLog(`${data.type}: ${data.message}`);
+
+            // Handle connection establishment
+            if (data.type === "connection" && data.source === "Research Assistant") {
+                const targetNode = nodes.find(n => n.id === data.target);
+                const sourceNode = nodes.find(n => n.id === data.source);
+                if (sourceNode && targetNode) {
+                    links.push({ source: sourceNode, target: targetNode });
+                    updateLinks();
+                    setTimeout(() => {
+                        links = links.filter(l => l.source !== sourceNode || l.target !== targetNode);
+                        updateLinks();
+                    }, 2000);
+                }
+                // Simulate tool list retrieval (assuming backend sends tools separately or we mock it)
+                showTools(data.target);
+            }
+
+            // Handle Claude tool selection
+            if (data.message.includes("Claude is calling")) {
+                const claudeNode = nodes.find(n => n.id === "Claude");
+                const targetServer = data.message.match(/tool: (\w+)/)?.[1]?.split('_')[0] || "";
+                const targetNode = nodes.find(n => n.id.charAt(0).toUpperCase() + n.id.slice(1) === targetServer.charAt(0).toUpperCase() + targetServer.slice(1));
+                if (claudeNode && targetNode) {
+                    d3.select(claudeNode._groups[0][0]).classed("active", true);
+                    links.push({ source: claudeNode, target: targetNode });
+                    updateLinks();
+                    setTimeout(() => {
+                        d3.select(claudeNode._groups[0][0]).classed("active", false);
+                        links = links.filter(l => l.source !== claudeNode || l.target !== targetNode);
+                        updateLinks();
+                    }, 2000);
+                }
+                tooltip.transition().duration(200).style("opacity", 0.9)
+                    .html(`Prompt: "Use tool for ${data.message.split("with input")[0].trim()}"\nInput: ${data.message.split("with input")[1] || "N/A"}`)
+                    .style("left", (claudeNode.x + 20) + "px")
+                    .style("top", (claudeNode.y - 30) + "px");
+                setTimeout(() => tooltip.transition().duration(500).style("opacity", 0), 3000);
+            }
+
+            // General event handling
+            if (data.source && data.target) {
+                const sourceNode = nodes.find(n => n.id === data.source);
+                const targetNode = nodes.find(n => n.id === data.target);
+                if (sourceNode && targetNode) {
+                    links.push({ source: sourceNode, target: targetNode });
+                    updateLinks();
+                    setTimeout(() => {
+                        links = links.filter(l => l.source !== sourceNode || l.target !== targetNode);
+                        updateLinks();
+                    }, 2000);
+                }
+            }
+        };
+        ws.onerror = (error) => addLog(`WebSocket error: ${error}`);
+        ws.onclose = () => addLog("WebSocket connection closed");
+
+        function updateLinks() {
+            link.data(links).exit().remove();
+            link.data(links).enter().append("line").attr("class", "link");
+            simulation.force("link").links(links);
+            simulation.alpha(1).restart();
+        }
+
+        // Mock tool lists (replace with actual data from backend if available)
+        const toolLists = {
+            "Brave": "brave_web_search: Web search\nbrave_local_search: Local search",
+            "Puppeteer": "puppeteer_navigate: Navigate URL\npuppeteer_screenshot: Take screenshot",
+            "GitHub": "search_repositories: Search repos\nget_pull_request: Get PR details",
+            "Notion": "create_page: Create page\nsearch_pages: Search pages"
+        };
+
+        function showTools(server) {
+            const node = nodes.find(n => n.id === server);
+            if (node) {
+                tooltip.transition().duration(200).style("opacity", 0.9)
+                    .html(`Tools for ${server}:\n${toolLists[server] || "No tools available"}`)
+                    .style("left", (node.x + 20) + "px")
+                    .style("top", (node.y - 30) + "px");
+                setTimeout(() => tooltip.transition().duration(500).style("opacity", 0), 3000);
+            }
+        }
+    </script>
+</body>
+</html>
